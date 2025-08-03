@@ -1,0 +1,16 @@
+*~
+*.bak
+*.class
+*.jar
+*.o
+*.obj
+*.orig
+*.swp
+/bin/
+/.classpath
+/gen-src/
+/.idea
+/.project
+/tmp/
+/.svn/
+/target/
