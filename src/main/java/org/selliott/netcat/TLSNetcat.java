@@ -1,11 +1,7 @@
 package org.selliott.netcat;
 
 import javax.net.ssl.*;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -18,6 +14,8 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -30,8 +28,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * Simple Netcat-like program supporting TLS or unencrypted data. This was mostly written by various AIs.
  */
 public class TLSNetcat {
-    // Static
+    // Static -  mostly for unit tests.
     static AtomicLong listenCount = new AtomicLong();
+    static Object stateLock = new Object();
 
     // Instance
     private final String[] args;
@@ -47,6 +46,7 @@ public class TLSNetcat {
     private String outputFile;
     private boolean quiet;
     private boolean verbose;
+    private boolean wait;
 
     public TLSNetcat(String[] args) {
         this.args = args;
@@ -54,25 +54,35 @@ public class TLSNetcat {
 
     /**
      * Create a pipe suitable for calling pipe().
-     * @param inputStream InputStream to read from
-     * @param outputStream OutputStream to write to
-     * @param name Name of the thread for debugging purposes
+     *
+     * @param name          Name of the thread for debugging purposes
+     * @param inputStream   InputStream to read from
+     * @param outputStream  OutputStream to write to
+     * @param socket        The socket being written to, or read from.
+     * @param socketWrite   true if this thread is writing to the socket, false if reading from it.
      * @param threadResults BlockingQueue to hold the result of the thread execution
      * @return A Thread that will pipe data between the InputStream and OutputStream.
      */
-    private Thread createPipeThread(final InputStream inputStream,
-                                           final OutputStream outputStream, final String name,
-                                           final BlockingQueue<Optional<Exception>> threadResults) {
+    private Thread createPipeThread(final String name, final InputStream inputStream,
+                                    final OutputStream outputStream,
+                                    final Socket socket, boolean socketWrite,
+                                    final BlockingQueue<Optional<Exception>> threadResults) {
         final Thread thread = new Thread(() -> {
-            log("[TLSNetcat] Starting pipe thread: " + name, true);
+            log("Starting pipe thread: " + name, true);
             Exception ex = null;
             try {
                 pipe(inputStream, outputStream);
+                outputStream.flush();
+                if (socketWrite) {
+                    socket.shutdownOutput(); // Close the output stream if writing to the socket
+                } else {
+                    socket.shutdownInput(); // Close the input stream if reading from the socket
+                }
             } catch (final Exception e) {
                 ex = e;
             }
             finally {
-                log("[TLSNetcat] Ending pipe thread: " + name, true);
+                log("Ending pipe thread. ex=" + ex, true);
                 threadResults.add(Optional.ofNullable(ex));
             }
         });
@@ -130,8 +140,12 @@ public class TLSNetcat {
         final PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(der);
         try {
             return KeyFactory.getInstance("RSA").generatePrivate(spec);
-        } catch (Exception e) {
-            return KeyFactory.getInstance("EC").generatePrivate(spec);
+        } catch (Exception rsa) {
+            try {
+                return KeyFactory.getInstance("EC").generatePrivate(spec);
+            } catch (Exception ec) {
+                throw new IllegalArgumentException("Failed to parse private key as RSA or EC", rsa);
+            }
         }
     }
 
@@ -139,9 +153,9 @@ public class TLSNetcat {
      * Notify that we are listening. This is just for testing so that the test can know that it is safe to start the client.
      */
     private static void notifyListen() {
-        synchronized (listenCount) {
+        synchronized (stateLock) {
             listenCount.incrementAndGet();
-            listenCount.notifyAll();
+            stateLock.notifyAll();
         }
     }
 
@@ -161,7 +175,9 @@ public class TLSNetcat {
         if (isVerbose && !verbose) {
             return;
         }
-        System.err.println(message);
+        final String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+        final String threadName = Thread.currentThread().getName();
+        System.err.println(timestamp + " [" + threadName + "] " + message);
     }
 
     /**
@@ -195,7 +211,6 @@ public class TLSNetcat {
         int r;
         while ((r = in.read(buf)) != -1) {
             out.write(buf, 0, r);
-            out.flush();
         }
     }
 
@@ -210,31 +225,70 @@ public class TLSNetcat {
         // for the first thread to finish.
         final BlockingQueue<Optional<Exception>> threadResults = new LinkedBlockingQueue<>();
 
-        final InputStream inputStream = inputFile != null ? new FileInputStream(inputFile) : System.in;
-        final OutputStream outputStream = outputFile != null ? new FileOutputStream(outputFile) : System.out;
+        final InputStream inputStream = (inputFile != null && !inputFile.equals("null")) ?
+            new FileInputStream(inputFile) : (inputFile != null ? null : System.in);
+        final OutputStream outputStream = (outputFile != null && !outputFile.equals("null")) ?
+            new FileOutputStream(outputFile) : (outputFile != null ? null : System.out);
 
+        Thread socketWriteThread = null;
+        Thread socketReadThread = null;
         try {
-            final Thread stdinThread = createPipeThread(inputStream, socket.getOutputStream(), "Socket Write",
-                    threadResults);
-            stdinThread.start();
+            // Only start socket write thread if we have an input stream
+            if (inputStream != null) {
+                socketWriteThread = createPipeThread("Socket Write", inputStream, socket.getOutputStream(),
+                        socket, true, threadResults);
+                socketWriteThread.start();
+            }
 
-            final Thread stdoutThread = createPipeThread(socket.getInputStream(), outputStream, "Socket Read",
-                    threadResults);
-            stdoutThread.start();
+            // Only start socket read thread if we have an output stream
+            if (outputStream != null) {
+                socketReadThread = createPipeThread("Socket Read", socket.getInputStream(), outputStream,
+                        socket, false, threadResults);
+                socketReadThread.start();
+            }
 
-            // Get the first result from threadResults and act on it. We don't care
-            // about the second thread's result since it is just a result of the socket
-            // being closed.
+            // If both threads are null, we have nothing to do
+            if (socketWriteThread == null && socketReadThread == null) {
+                return;
+            }
+
+            // Count how many threads were actually started
+            final int threadCount = (socketWriteThread != null ? 1 : 0) + (socketReadThread != null ? 1 : 0);
+
+            // Warn if user specified -w but only one thread is running
+            if (wait && threadCount == 1) {
+                log("Warning: -w specified but only one thread running (one file is 'null')");
+            }
+
+            // By default, we only care about waiting for the first thread. However, if -w wait is specified then wait
+            // for the second thread as well, and check it for exceptions as well.
+
             final Optional<Exception> firstResult = threadResults.take();
+            final Optional<Exception> secondResult = (wait && threadCount == 2) ? threadResults.take() : null;
+
+            final long beforeFirstWaitMillis = System.currentTimeMillis();
             if (firstResult.isPresent()) {
                 throw firstResult.get();
             }
-        } finally {
-            if (inputFile != null && inputStream != System.in) {
-                inputStream.close();
+            log("First thread wait completed in " +
+                    (System.currentTimeMillis() - beforeFirstWaitMillis) + " ms", true);
+
+            final long beforeSecondWaitMillis = System.currentTimeMillis();
+            if (wait && threadCount == 2 && secondResult.isPresent()) {
+                throw secondResult.get();
             }
-            if (outputFile != null && outputStream != System.out) {
-                outputStream.close();
+            if (wait && threadCount == 2) {
+                log("Second thread wait completed in " +
+                        (System.currentTimeMillis() - beforeSecondWaitMillis) + " ms", true);
+            }
+        } finally {
+            // Increase the odds of the threads exiting. This is mostly just helpful for the tests which do multiple
+            // transfers in a single process. Outside of tests these daemon threads will exit when the process exits.
+            if (socketWriteThread != null) {
+                socketWriteThread.interrupt();
+            }
+            if (socketReadThread != null) {
+                socketReadThread.interrupt();
             }
         }
     }
@@ -251,6 +305,7 @@ public class TLSNetcat {
         unencrypted = false;
         quiet = false;
         verbose = false;
+        wait = false;
 
         int argIndex = 0;
         for (; argIndex < args.length; argIndex++) {
@@ -293,6 +348,9 @@ public class TLSNetcat {
                         break;
                     case 'v':
                         verbose = true;
+                        break;
+                    case 'w':
+                        wait = true;
                         break;
                     default:
                         usage("Unknown option: " + option);
@@ -361,13 +419,13 @@ public class TLSNetcat {
                     return new java.security.cert.X509Certificate[0];}
             }};
             ctx.init(null, tms, null);
-            log("[TLSNetcat] Trusting all server certificates");
+            log("Trusting all server certificates");
         } else {
             ctx.init(null, null, null);
         }
         try (final SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(host, port)) {
             socket.startHandshake();
-            log("[TLSNetcat] Connected to " + host + ":" + port);
+            log("Connected to " + host + ":" + port);
             pipeBoth(socket);
         }
     }
@@ -379,7 +437,7 @@ public class TLSNetcat {
      */
     private void runClientUnencrypted() throws Exception {
         try (final Socket socket = new Socket(host, port)) {
-            log("[TLSNetcat] Connected to " + host + ":" + port);
+            log("Connected to " + host + ":" + port);
             pipeBoth(socket);
         }
     }
@@ -410,12 +468,12 @@ public class TLSNetcat {
         final SSLServerSocketFactory ssf = ctx.getServerSocketFactory();
         try (SSLServerSocket ss = (SSLServerSocket) ssf.createServerSocket(port, 50,
                 InetAddress.getByName(host))) {
-            log("[TLSNetcat] Listening on " + host + ":" + port);
+            log("Listening on " + host + ":" + port);
             notifyListen();
             try (final SSLSocket socket = (SSLSocket) ss.accept()) {
                 socket.setUseClientMode(false);
                 socket.startHandshake();
-                log("[TLSNetcat] Accepted connection from " + socket.getRemoteSocketAddress());
+                log("Accepted connection from " + socket.getRemoteSocketAddress());
                 pipeBoth(socket);
             }
         }
@@ -428,11 +486,11 @@ public class TLSNetcat {
      */
     private void runServerUnencrypted() throws Exception {
         try (final ServerSocket ss = new ServerSocket(port, 50, InetAddress.getByName(host))) {
-            log("[TLSNetcat] Listening on " + host + ":" + port);
+            log("Listening on " + host + ":" + port);
             notifyListen();
 
             try (final Socket socket = ss.accept()) {
-                log("[TLSNetcat] Accepted connection from " + socket.getRemoteSocketAddress());
+                log("Accepted connection from " + socket.getRemoteSocketAddress());
                 pipeBoth(socket);
             }
         }
@@ -469,6 +527,7 @@ public class TLSNetcat {
         System.err.println("  -t          trust all server certificates (client mode)");
         System.err.println("  -u          unencrypted data (no TLS)");
         System.err.println("  -v          verbose logging");
+        System.err.println("  -w          wait for both threads to complete");
         System.exit(1);
     }
 }

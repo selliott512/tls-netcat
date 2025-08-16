@@ -1,0 +1,8 @@
+# Version of the configuration file format
+version: 2
+
+# Global settings for ggshield
+secret:
+  # Paths and files to ignore during scans
+  ignored-paths:
+    - 'certs/key.pem'

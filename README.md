@@ -1,6 +1,6 @@
 # tls-netcat
 
-A simple netcat-like program that supports both TLS encrypted and unencrypted connections.
+A simple netcat-like program that supports both TLS encrypted and unencrypted connections. It's bidirectional, so it can also send data from server to client.
 
 ## Usage
 
@@ -32,6 +32,7 @@ java -cp target/classes org.selliott.netcat.TLSNetcat -ui /tmp/1MB localhost 123
 - `-t` - Trust all server certificates (client mode)
 - `-u` - Unencrypted data (no TLS)
 - `-v` - Verbose logging
+- `-w` - Wait for both threads to complete
 
 ## Building
 
