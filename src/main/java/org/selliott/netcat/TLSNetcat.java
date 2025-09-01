@@ -2,6 +2,8 @@ package org.selliott.netcat;
 
 import javax.net.ssl.*;
 import java.io.*;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -29,11 +31,15 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class TLSNetcat {
     // Static -  mostly for unit tests.
-    static AtomicLong listenCount = new AtomicLong();
-    static Object stateLock = new Object();
+    static final AtomicLong listenCount = new AtomicLong();
+    static volatile Boolean lastServerSocketBoundToAnyInterface = null;
+    static volatile Boolean lastSocketIsIPv6 = null;
+    static final Object stateLock = new Object();
 
     // Instance
     private final String[] args;
+    private boolean ipv4;
+    private boolean ipv6;
     private int blockSize;
     private boolean trustAll;
     private boolean listen;
@@ -299,6 +305,8 @@ public class TLSNetcat {
      * @throws Exception If there is an error running the program.
      */
     public void run() throws Exception {
+        ipv4 = false;
+        ipv6 = false;
         blockSize = 8192;
         trustAll = false;
         listen = false;
@@ -316,6 +324,12 @@ public class TLSNetcat {
             }
             for (final char option : arg.substring(1).toCharArray()) {
                 switch (option) {
+                    case '4':
+                        ipv4 = true;
+                        break;
+                    case '6':
+                        ipv6 = true;
+                        break;
                     case 'b':
                         if (argIndex + 1 >= args.length) {
                             usage("-b requires block size");
@@ -363,14 +377,43 @@ public class TLSNetcat {
             usage("Cannot specify both -q (quiet) and -v (verbose) options");
         }
 
-        // At this point, argIndex should point to the first positional argument.
-        final int positionalArgsCount = args.length - argIndex;
-        if (positionalArgsCount < 2 || positionalArgsCount > 4) {
-            usage("Expected 2 to 4 positional arguments: host port [certs/server.pem [certs/key.pem]]");
+        // Validate that both -4 and -6 are not specified together
+        if (ipv4 && ipv6) {
+            usage("Cannot specify both -4 (IPv4) and -6 (IPv6) options");
         }
 
-        host = args[argIndex++];
-        port = Integer.parseInt(args[argIndex++]);
+        // At this point, argIndex should point to the first positional argument.
+        final int positionalArgsCount = args.length - argIndex;
+        if (listen) {
+            if (positionalArgsCount < 1 || positionalArgsCount > 4) {
+                usage("Expected 1 to 4 positional arguments in listen mode: [host] port [certs/server.pem [certs/key.pem]]");
+            }
+        } else {
+            if (positionalArgsCount < 2 || positionalArgsCount > 2) {
+                usage("Expected 2 positional arguments in connect mode: host port");
+            }
+        }
+
+        if (listen) {
+            // In listen mode, try to determine if first argument is a port (integer) or host (string)
+            try {
+                // Try to parse first argument as port - if successful, it's any interface mode
+                port = Integer.parseInt(args[argIndex]);
+                host = null; // Any interface
+                argIndex++;
+            } catch (NumberFormatException e) {
+                // First argument is not a port, so it must be host+port
+                if (positionalArgsCount < 2) {
+                    usage("Listen mode requires either port or host+port");
+                }
+                host = args[argIndex++];
+                port = Integer.parseInt(args[argIndex++]);
+            }
+        } else {
+            // Connect mode - always requires host and port
+            host = args[argIndex++];
+            port = Integer.parseInt(args[argIndex++]);
+        }
         serverPem = "certs/server.pem";
         keyPem = "certs/key.pem";
         if (argIndex < args.length) {
@@ -423,7 +466,12 @@ public class TLSNetcat {
         } else {
             ctx.init(null, null, null);
         }
-        try (final SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(host, port)) {
+        final InetAddress connectAddress = getConnectionAddress(host);
+        try (final SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(connectAddress, port)) {
+            // Note whether the last non-server socket created is IPv6.
+            final InetAddress inetAddr = socket.getInetAddress();
+            lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
+
             socket.startHandshake();
             log("Connected to " + host + ":" + port);
             pipeBoth(socket);
@@ -436,7 +484,12 @@ public class TLSNetcat {
      * @throws Exception If there is an error during the connection or data transfer.
      */
     private void runClientUnencrypted() throws Exception {
-        try (final Socket socket = new Socket(host, port)) {
+        final InetAddress connectAddress = getConnectionAddress(host);
+        try (final Socket socket = new Socket(connectAddress, port)) {
+            // Note whether the last non-server socket created is IPv6.
+            final InetAddress inetAddr = socket.getInetAddress();
+            lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
+
             log("Connected to " + host + ":" + port);
             pipeBoth(socket);
         }
@@ -466,11 +519,17 @@ public class TLSNetcat {
         kmf.init(ks, new char[0]);
         ctx.init(kmf.getKeyManagers(), null, null);
         final SSLServerSocketFactory ssf = ctx.getServerSocketFactory();
-        try (SSLServerSocket ss = (SSLServerSocket) ssf.createServerSocket(port, 50,
-                InetAddress.getByName(host))) {
-            log("Listening on " + host + ":" + port);
+        final InetAddress bindAddress = getServerBindAddress(host);
+        try (SSLServerSocket ss = (SSLServerSocket) ssf.createServerSocket(port, 50, bindAddress)) {
+            final InetAddress serverInetAddr = ss.getInetAddress();
+            lastServerSocketBoundToAnyInterface = serverInetAddr != null && serverInetAddr.isAnyLocalAddress();
+            log("Listening on " + (host != null ? host : "*") + ":" + port);
             notifyListen();
             try (final SSLSocket socket = (SSLSocket) ss.accept()) {
+                // Note whether the last non-server socket created is IPv6.
+                final InetAddress inetAddr = socket.getInetAddress();
+                lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
+
                 socket.setUseClientMode(false);
                 socket.startHandshake();
                 log("Accepted connection from " + socket.getRemoteSocketAddress());
@@ -485,14 +544,77 @@ public class TLSNetcat {
      * @throws Exception If there is an error during the server setup or data transfer.
      */
     private void runServerUnencrypted() throws Exception {
-        try (final ServerSocket ss = new ServerSocket(port, 50, InetAddress.getByName(host))) {
-            log("Listening on " + host + ":" + port);
+        final InetAddress bindAddress = getServerBindAddress(host);
+        try (final ServerSocket ss = new ServerSocket(port, 50, bindAddress)) {
+            final InetAddress serverInetAddr = ss.getInetAddress();
+            lastServerSocketBoundToAnyInterface = serverInetAddr != null && serverInetAddr.isAnyLocalAddress();
+            log("Listening on " + (host != null ? host : "*") + ":" + port);
             notifyListen();
 
             try (final Socket socket = ss.accept()) {
+                // Note whether the last non-server socket created is IPv6.
+                final InetAddress inetAddr = socket.getInetAddress();
+                lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
+
                 log("Accepted connection from " + socket.getRemoteSocketAddress());
                 pipeBoth(socket);
             }
+        }
+    }
+
+    /**
+     * Gets the appropriate InetAddress for connecting based on IPv4/IPv6 preferences and tracks IP version.
+     *
+     * @param host The hostname to resolve
+     * @return InetAddress with appropriate IP version
+     * @throws Exception If hostname resolution fails
+     */
+    private InetAddress getConnectionAddress(final String host) throws Exception {
+        if (ipv4 || ipv6) {
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            InetAddress chosenAddress = null;
+
+            // Find address of the preferred type
+            for (InetAddress addr : addresses) {
+                if (ipv4 && addr instanceof Inet4Address) {
+                    chosenAddress = addr;
+                    break;
+                } else if (ipv6 && addr instanceof Inet6Address) {
+                    chosenAddress = addr;
+                    break;
+                }
+            }
+
+            if (chosenAddress == null) {
+                throw new Exception("No " + (ipv4 ? "IPv4" : "IPv6") + " address found for host: " + host);
+            }
+
+            return chosenAddress;
+        } else {
+            // No preference specified, use default resolution
+            return InetAddress.getByName(host);
+        }
+    }
+
+    /**
+     * Gets the appropriate InetAddress for server binding based on IPv4/IPv6 preferences.
+     *
+     * @param host The hostname to bind to, or null for any interface
+     * @return InetAddress with appropriate IP version, or null for any interface
+     * @throws Exception If hostname resolution fails
+     */
+    private InetAddress getServerBindAddress(final String host) throws Exception {
+        if (host == null) {
+            // Bind to any interface with IP version preference
+            if (ipv4) {
+                return Inet4Address.getByName("0.0.0.0");
+            } else if (ipv6) {
+                return Inet6Address.getByName("::");
+            } else {
+                return null; // Any interface, any IP version
+            }
+        } else {
+            return getConnectionAddress(host);
         }
     }
 
@@ -515,10 +637,12 @@ public class TLSNetcat {
     private void usage(final String msg) {
         if (msg != null) System.err.println("Error: " + msg);
         System.err.println("Usage:");
-        System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] [-t] [-u] host port");
-        System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] -l [-u] host port [certs/server.pem " +
+        System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] [-t] [-u] [-4|-6] host port");
+        System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] -l [-u] [-4|-6] [host] port [certs/server.pem " +
                 "[certs/key.pem]]");
         System.err.println("Options:");
+        System.err.println("  -4          force IPv4");
+        System.err.println("  -6          force IPv6");
         System.err.println("  -b block    block size for writes (default 8192)");
         System.err.println("  -i in-file  in-file to use instead of stdin");
         System.err.println("  -l          listen (server mode)");

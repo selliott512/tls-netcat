@@ -78,11 +78,15 @@ public class TLSNetcatTest
         final boolean wait;
         final boolean clientBrokenPipeResetAllowed;
         final boolean serverBrokenPipeResetAllowed;
+        final boolean anyInterface;
+        final boolean ipv4;
+        final boolean ipv6;
 
         public TestCase(final String name, final boolean active, final String[] serverArgsTemplate,
                         final String[] clientArgsTemplate, final boolean expectedToPass, final boolean bidirectional,
                         final boolean wait, final boolean clientBrokenPipeResetAllowed,
-                        final boolean serverBrokenPipeResetAllowed) {
+                        final boolean serverBrokenPipeResetAllowed, final boolean anyInterface,
+                        final boolean ipv4, final boolean ipv6) {
             this.name = name;
             this.active = active;
             this.serverArgsTemplate = serverArgsTemplate;
@@ -92,6 +96,9 @@ public class TLSNetcatTest
             this.wait = wait;
             this.clientBrokenPipeResetAllowed = clientBrokenPipeResetAllowed;
             this.serverBrokenPipeResetAllowed = serverBrokenPipeResetAllowed;
+            this.anyInterface = anyInterface;
+            this.ipv4 = ipv4;
+            this.ipv6 = ipv6;
 
             // Assert the name is consistent with the test case properties
             final String lowerName = name.toLowerCase();
@@ -112,6 +119,29 @@ public class TLSNetcatTest
             final boolean hasShouldFailInName = lowerName.contains("should fail");
             if (expectedToPass == hasShouldFailInName) {
                 throw new IllegalArgumentException("Test name '" + name + "' failure indicator inconsistent with expectedToPass=" + expectedToPass);
+            }
+
+            // Check anyInterface consistency
+            final boolean hasAnyInterfaceInName = lowerName.contains("any interface");
+            if (anyInterface != hasAnyInterfaceInName) {
+                throw new IllegalArgumentException("Test name '" + name + "' any interface indicator inconsistent with anyInterface=" + anyInterface);
+            }
+
+            // Check IPv4 consistency
+            final boolean hasIPv4InName = lowerName.contains("ipv4");
+            if (ipv4 != hasIPv4InName) {
+                throw new IllegalArgumentException("Test name '" + name + "' IPv4 indicator inconsistent with ipv4=" + ipv4);
+            }
+
+            // Check IPv6 consistency
+            final boolean hasIPv6InName = lowerName.contains("ipv6");
+            if (ipv6 != hasIPv6InName) {
+                throw new IllegalArgumentException("Test name '" + name + "' IPv6 indicator inconsistent with ipv6=" + ipv6);
+            }
+
+            // Check that both IPv4 and IPv6 are not specified together
+            if (ipv4 && ipv6) {
+                throw new IllegalArgumentException("Test case '" + name + "' cannot have both ipv4 and ipv6 set to true");
             }
         }
 
@@ -134,7 +164,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "{inputFile}", "-o", "null", "-u", "{host}", "{port}"},
                         true,
                         false,
-                                false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Encrypted (TLS)",
@@ -144,7 +178,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "{inputFile}", "-o", "null", "-t", "{host}", "{port}"},
                         true,
                         false,
-                        false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Unencrypted Reverse",
@@ -153,7 +191,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "null", "-o", "{outputFile}", "-u", "{host}", "{port}"},
                         true,
                         false,
-                        false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Encrypted (TLS) Reverse",
@@ -163,7 +205,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "null", "-o", "{outputFile}", "-t", "{host}", "{port}"},
                         true,
                         false,
-                        false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Unencrypted Bidirectional",
@@ -174,7 +220,11 @@ public class TLSNetcatTest
                                 "{port}"},
                         true,
                         true,
-                        false, true,
+                        false,
+                        true,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Encrypted (TLS) Bidirectional",
@@ -185,7 +235,11 @@ public class TLSNetcatTest
                                 "{port}"},
                         true,
                         true,
-                        false, true,
+                        false,
+                        true,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Unencrypted Bidirectional Wait",
@@ -196,7 +250,11 @@ public class TLSNetcatTest
                                 "{port}"},
                         true,
                         true,
-                        true, false,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Encrypted (TLS) Bidirectional Wait",
@@ -207,7 +265,11 @@ public class TLSNetcatTest
                                 "{port}"},
                         true,
                         true,
-                        true, false,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Client Unencrypted to Server Encrypted (should fail)",
@@ -217,7 +279,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "{inputFile}", "-o", "null", "-u", "{host}", "{port}"},
                         false,
                         false,
-                        false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 // TODO: Disabled because the server does not reply to the TLS handshake, and the client hangs.
                 Arguments.of(new TestCase(
@@ -227,7 +293,11 @@ public class TLSNetcatTest
                         new String[]{"-vi", "{inputFile}", "-o", "null", "-t", "{host}", "{port}"},
                         false,
                         false,
-                        false, false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
                         false)),
                 Arguments.of(new TestCase(
                         "Encrypted without -t flag (should fail)",
@@ -237,8 +307,93 @@ public class TLSNetcatTest
                         new String[]{"-vi", "{inputFile}", "-o", "null", "{host}", "{port}"},
                         false,
                         false,
-                        false, false,
-                        false))
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false)),
+                Arguments.of(new TestCase(
+                        "Unencrypted Any Interface",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-lu", "{OMIT_HOST}", "{port}"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-u", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                        false)),
+                Arguments.of(new TestCase(
+                        "Encrypted (TLS) Any Interface",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-l", "{OMIT_HOST}", "{port}", "certs/server.pem",
+                                "certs/key.pem"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-t", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                        false)),
+                Arguments.of(new TestCase(
+                        "Unencrypted IPv4",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-4lu", "{host}", "{port}"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-4u", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false)),
+                Arguments.of(new TestCase(
+                        "Encrypted (TLS) IPv4",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-4l", "{host}", "{port}", "certs/server.pem",
+                                "certs/key.pem"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-4t", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false)),
+                Arguments.of(new TestCase(
+                        "Unencrypted IPv6",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-6lu", "{host}", "{port}"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-6u", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true)),
+                Arguments.of(new TestCase(
+                        "Encrypted (TLS) IPv6",
+                        true,
+                        new String[]{"-vi", "null", "-o", "{outputFile}", "-6l", "{host}", "{port}", "certs/server.pem",
+                                "certs/key.pem"},
+                        new String[]{"-vi", "{inputFile}", "-o", "null", "-6t", "{host}", "{port}"},
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        true))
         );
     }
 
@@ -367,6 +522,20 @@ public class TLSNetcatTest
                 testPrefix + "Both server and client should be successful if expected to pass (server="
                         + serverSuccessful.get() + ", client=" + clientSuccessful.get() + ")");
 
+        // Validate that server socket was bound to any interface when expected
+        if (testCase.expectedToPass && bothSuccessful) {
+            assertEquals(testCase.anyInterface, Boolean.TRUE.equals(
+                    TLSNetcat.lastServerSocketBoundToAnyInterface),
+                    testPrefix + "Server socket anyInterface binding should match test case expectation");
+        }
+
+        // Validate IPv4/IPv6 socket type when expected
+        if (testCase.expectedToPass && bothSuccessful && (testCase.ipv4 || testCase.ipv6)) {
+            assertEquals(testCase.ipv6, Boolean.TRUE.equals(TLSNetcat.lastSocketIsIPv6),
+                    testPrefix + "Socket IP version should match test case expectation (expected IPv6="
+                            + testCase.ipv6 + ", actual=" + TLSNetcat.lastSocketIsIPv6 + ")");
+        }
+
         // Validate output files based on expected results
         final FileState outputState;
         final FileState outputStateBig;
@@ -442,6 +611,7 @@ public class TLSNetcatTest
                                final Path outputFile, final String host,
                                final int port, final Path inputFileBig,
                                final Path outputFileBig) {
+        // First pass: replace placeholders
         String[] args = new String[template.length];
         for (int i = 0; i < template.length; i++) {
             args[i] = template[i]
@@ -452,7 +622,15 @@ public class TLSNetcatTest
                     .replace("{host}", host)
                     .replace("{port}", String.valueOf(port));
         }
-        return args;
+
+        // Second pass: remove any arguments that are "{OMIT_HOST}" to support any interface tests
+        java.util.List<String> argsList = new java.util.ArrayList<>();
+        for (String arg : args) {
+            if (!"{OMIT_HOST}".equals(arg)) {
+                argsList.add(arg);
+            }
+        }
+        return argsList.toArray(new String[0]);
     }
 
     /**
