@@ -5,6 +5,7 @@ import java.io.*;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
@@ -53,6 +54,12 @@ public class TLSNetcat {
     private boolean quiet;
     private boolean verbose;
     private boolean wait;
+    private Integer sendBufferSize;
+    private long socketWriteBeforeMillis;
+    private long socketWriteAfterMillis;
+    private long socketReadBeforeMillis;
+    private long socketReadAfterMillis;
+    private Integer receiveBufferSize;
 
     public TLSNetcat(String[] args) {
         this.args = args;
@@ -77,6 +84,15 @@ public class TLSNetcat {
             log("Starting pipe thread: " + name, true);
             Exception ex = null;
             try {
+                final long now = System.currentTimeMillis();
+                if (socketWrite)
+                {
+                    socketWriteBeforeMillis = now;
+                }
+                else
+                {
+                    socketReadBeforeMillis = now;
+                }
                 pipe(inputStream, outputStream);
                 outputStream.flush();
                 if (socketWrite) {
@@ -88,6 +104,15 @@ public class TLSNetcat {
                 ex = e;
             }
             finally {
+                final long now = System.currentTimeMillis();
+                if (socketWrite)
+                {
+                    socketWriteAfterMillis = now;
+                }
+                else
+                {
+                    socketReadAfterMillis = now;
+                }
                 log("Ending pipe thread. ex=" + ex, true);
                 threadResults.add(Optional.ofNullable(ex));
             }
@@ -354,6 +379,18 @@ public class TLSNetcat {
                     case 'q':
                         quiet = true;
                         break;
+                    case 'r':
+                        if (argIndex + 1 >= args.length) {
+                            usage("-r requires receive buffer size");
+                        }
+                        receiveBufferSize = Integer.parseInt(args[++argIndex]);
+                        break;
+                    case 's':
+                        if (argIndex + 1 >= args.length) {
+                            usage("-s requires send buffer size");
+                        }
+                        sendBufferSize = Integer.parseInt(args[++argIndex]);
+                        break;
                     case 't':
                         trustAll = true;
                         break;
@@ -445,6 +482,38 @@ public class TLSNetcat {
                 runClient();
             }
         }
+
+        if (verbose) {
+            // File send statistics.
+            if (socketWriteAfterMillis > 0) {
+                final long durationMillis = socketWriteAfterMillis - socketWriteBeforeMillis;
+                final double seconds = durationMillis / 1000.0;
+                if (inputFile != null) {
+                    final long bytesSent = inputFile.equals("null") ? 0 : Files.size(Paths.get(inputFile));
+                    final double bytesPerSec = bytesSent / seconds;
+                    final double mbitPerSec = (bytesPerSec * 8) / 1_000_000.0;
+                    log(String.format("Sent     %7d bytes in %.3f seconds at %.0f bytes / sec = %.3f Mbit",
+                            bytesSent, seconds, bytesPerSec, mbitPerSec));
+                } else {
+                    log(String.format("Sent     unknown bytes in %.3f seconds", seconds));
+                }
+            }
+
+            // File receive statistics.
+            if (socketReadAfterMillis > 0) {
+                final long durationMillis = socketReadAfterMillis - socketReadBeforeMillis;
+                final double seconds = durationMillis / 1000.0;
+                if (outputFile != null) {
+                    final long bytesReceived = outputFile.equals("null") ? 0 : Files.size(Paths.get(outputFile));
+                    final double bytesPerSec = bytesReceived / seconds;
+                    final double mbitPerSec = (bytesPerSec * 8) / 1_000_000.0;
+                    log(String.format("Received %7d bytes in %.3f seconds at %.0f bytes / sec = %.3f Mbit",
+                            bytesReceived, seconds, bytesPerSec, mbitPerSec));
+                } else {
+                    log(String.format("Received unknown bytes in %.3f seconds", seconds));
+                }
+            }
+        }
     }
 
     /**
@@ -467,9 +536,17 @@ public class TLSNetcat {
             ctx.init(null, null, null);
         }
         final InetAddress connectAddress = getConnectionAddress(host);
-        try (final SSLSocket socket = (SSLSocket) ctx.getSocketFactory().createSocket(connectAddress, port)) {
-            // Note whether the last non-server socket created is IPv6.
+        final SSLSocketFactory sslSocketFactory = ctx.getSocketFactory();
+        try (final SSLSocket socket = (SSLSocket) sslSocketFactory.createSocket()) { // unconnected
+            if (receiveBufferSize != null) {
+                socket.setReceiveBufferSize(receiveBufferSize);
+            }
+            if (sendBufferSize != null) {
+                socket.setSendBufferSize(sendBufferSize);
+            }
+            socket.connect(new InetSocketAddress(connectAddress, port));  // now connect
             final InetAddress inetAddr = socket.getInetAddress();
+            // Note whether the last non-server socket created is IPv6.
             lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
 
             socket.startHandshake();
@@ -485,9 +562,16 @@ public class TLSNetcat {
      */
     private void runClientUnencrypted() throws Exception {
         final InetAddress connectAddress = getConnectionAddress(host);
-        try (final Socket socket = new Socket(connectAddress, port)) {
-            // Note whether the last non-server socket created is IPv6.
+        try (final Socket socket = new Socket()) {
+            if (receiveBufferSize != null) {
+                socket.setReceiveBufferSize(receiveBufferSize);
+            }
+            if (sendBufferSize != null) {
+                socket.setSendBufferSize(sendBufferSize);
+            }
+            socket.connect(new InetSocketAddress(connectAddress, port));
             final InetAddress inetAddr = socket.getInetAddress();
+            // Note whether the last non-server socket created is IPv6.
             lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
 
             log("Connected to " + host + ":" + port);
@@ -521,11 +605,20 @@ public class TLSNetcat {
         final SSLServerSocketFactory ssf = ctx.getServerSocketFactory();
         final InetAddress bindAddress = getServerBindAddress(host);
         try (SSLServerSocket ss = (SSLServerSocket) ssf.createServerSocket(port, 50, bindAddress)) {
+            if (receiveBufferSize != null) {
+                ss.setReceiveBufferSize(receiveBufferSize);
+            }
             final InetAddress serverInetAddr = ss.getInetAddress();
             lastServerSocketBoundToAnyInterface = serverInetAddr != null && serverInetAddr.isAnyLocalAddress();
             log("Listening on " + (host != null ? host : "*") + ":" + port);
             notifyListen();
             try (final SSLSocket socket = (SSLSocket) ss.accept()) {
+                if (receiveBufferSize != null) {
+                    socket.setReceiveBufferSize(receiveBufferSize);
+                }
+                if (sendBufferSize != null) {
+                    socket.setSendBufferSize(sendBufferSize);
+                }
                 // Note whether the last non-server socket created is IPv6.
                 final InetAddress inetAddr = socket.getInetAddress();
                 lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
@@ -546,12 +639,21 @@ public class TLSNetcat {
     private void runServerUnencrypted() throws Exception {
         final InetAddress bindAddress = getServerBindAddress(host);
         try (final ServerSocket ss = new ServerSocket(port, 50, bindAddress)) {
+            if (receiveBufferSize != null) {
+                ss.setReceiveBufferSize(receiveBufferSize);
+            }
             final InetAddress serverInetAddr = ss.getInetAddress();
             lastServerSocketBoundToAnyInterface = serverInetAddr != null && serverInetAddr.isAnyLocalAddress();
             log("Listening on " + (host != null ? host : "*") + ":" + port);
             notifyListen();
 
             try (final Socket socket = ss.accept()) {
+                if (receiveBufferSize != null) {
+                    socket.setReceiveBufferSize(receiveBufferSize);
+                }
+                if (sendBufferSize != null) {
+                    socket.setSendBufferSize(sendBufferSize);
+                }
                 // Note whether the last non-server socket created is IPv6.
                 final InetAddress inetAddr = socket.getInetAddress();
                 lastSocketIsIPv6 = inetAddr != null && inetAddr instanceof Inet6Address;
@@ -636,7 +738,7 @@ public class TLSNetcat {
      */
     private void usage(final String msg) {
         if (msg != null) System.err.println("Error: " + msg);
-        System.err.println("Usage:");
+        System.err.println("Usage (client then server, select options shown):");
         System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] [-t] [-u] [-4|-6] host port");
         System.err.println("  java org.selliott.netcat.TLSNetcat [-b block] -l [-u] [-4|-6] [host] port [certs/server.pem " +
                 "[certs/key.pem]]");
@@ -648,6 +750,8 @@ public class TLSNetcat {
         System.err.println("  -l          listen (server mode)");
         System.err.println("  -o out-file out-file to use instead of stdout");
         System.err.println("  -q          quiet mode (no logging)");
+        System.err.println("  -r size     receive buffer size (default: OS default/auto)");
+        System.err.println("  -s size     send buffer size (default: OS default/auto)");
         System.err.println("  -t          trust all server certificates (client mode)");
         System.err.println("  -u          unencrypted data (no TLS)");
         System.err.println("  -v          verbose logging");

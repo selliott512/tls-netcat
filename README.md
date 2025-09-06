@@ -37,6 +37,8 @@ java -cp target/classes org.selliott.netcat.TLSNetcat -u [-i in-file] host port
 - `-l` - Listen (server mode)
 - `-o out-file` - Output file to use instead of stdout
 - `-q` - Quiet mode (no logging)
+- `-r size` - Receive buffer size (default: OS default)
+- `-s size` - Send buffer size (default: OS default)
 - `-t` - Trust all server certificates (client mode)
 - `-u` - Unencrypted data (no TLS)
 - `-v` - Verbose logging
@@ -53,10 +55,16 @@ tls-netcat requires Java 17 by default, but can be built for Java 11 without cod
 
 ## Building
 
-tls-netcat is a Maven project that can be built in the usual way for Maven projects. If you just want the classes and JAR file, so as referenced in the Running section below, then build with:
+tls-netcat is a Maven project that can be built in the usual way for Maven projects. If you just want the classes and JAR file, as referenced in the Running section below, then build with:
 
 ```bash
 mvn package
+```
+
+If you don't have Maven you should be able to use javac directly to build just the class files:
+
+```bash
+javac -d target/classes src/main/java/org/selliott/netcat/TLSNetcat.java
 ```
 
 ## Running
