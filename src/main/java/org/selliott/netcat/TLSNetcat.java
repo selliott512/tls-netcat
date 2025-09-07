@@ -55,10 +55,12 @@ public class TLSNetcat {
     private boolean verbose;
     private boolean wait;
     private Integer sendBufferSize;
-    private long socketWriteBeforeMillis;
-    private long socketWriteAfterMillis;
     private long socketReadBeforeMillis;
     private long socketReadAfterMillis;
+    private volatile boolean socketReadExceptionCaught;
+    private long socketWriteBeforeMillis;
+    private long socketWriteAfterMillis;
+    private volatile boolean socketWriteExceptionCaught;
     private Integer receiveBufferSize;
 
     public TLSNetcat(String[] args) {
@@ -108,10 +110,12 @@ public class TLSNetcat {
                 if (socketWrite)
                 {
                     socketWriteAfterMillis = now;
+                    socketWriteExceptionCaught = ex != null;
                 }
                 else
                 {
                     socketReadAfterMillis = now;
+                    socketReadExceptionCaught = ex != null;
                 }
                 log("Ending pipe thread. ex=" + ex, true);
                 threadResults.add(Optional.ofNullable(ex));
@@ -484,11 +488,18 @@ public class TLSNetcat {
         }
 
         if (verbose) {
+            // Where there any exceptions?
+            log("Exceptions caught during socket read/write: read=" + socketReadExceptionCaught +
+                    " write=" + socketWriteExceptionCaught);
+
             // File send statistics.
             if (socketWriteAfterMillis > 0) {
                 final long durationMillis = socketWriteAfterMillis - socketWriteBeforeMillis;
                 final double seconds = durationMillis / 1000.0;
-                if (inputFile != null) {
+                // The input file is required to do the calculation, but we must also know that there was no exception
+                // so that we can assume the entire file was sent.
+                // TODO: There could still be some data loss if there was an exception on close().
+                if (inputFile != null && !socketWriteExceptionCaught) {
                     final long bytesSent = inputFile.equals("null") ? 0 : Files.size(Paths.get(inputFile));
                     final double bytesPerSec = bytesSent / seconds;
                     final double mbitPerSec = (bytesPerSec * 8) / 1_000_000.0;
@@ -503,6 +514,7 @@ public class TLSNetcat {
             if (socketReadAfterMillis > 0) {
                 final long durationMillis = socketReadAfterMillis - socketReadBeforeMillis;
                 final double seconds = durationMillis / 1000.0;
+                // The output file existing is sufficient to do the calculation.
                 if (outputFile != null) {
                     final long bytesReceived = outputFile.equals("null") ? 0 : Files.size(Paths.get(outputFile));
                     final double bytesPerSec = bytesReceived / seconds;
